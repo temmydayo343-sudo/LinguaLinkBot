@@ -12,8 +12,17 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable not set!")
 
-# Free Translation API (LibreTranslate - no API key needed)
-LIBRE_TRANSLATE_URL = "https://libretranslate.com/translate"
+# Multiple translation API options (fallback if one fails)
+TRANSLATION_APIS = [
+    {
+        "url": "https://libretranslate.com/translate",
+        "name": "LibreTranslate"
+    },
+    {
+        "url": "https://translate.argosopentech.com/translate",
+        "name": "Argos Translate"
+    }
+]
 
 # Supported languages
 LANGUAGES = {
@@ -41,7 +50,14 @@ LANGUAGES = {
     "yo": "Yoruba",
     "ig": "Igbo",
     "zu": "Zulu",
-    "af": "Afrikaans"
+    "af": "Afrikaans",
+    "el": "Greek",
+    "he": "Hebrew",
+    "hu": "Hungarian",
+    "ro": "Romanian",
+    "sk": "Slovak",
+    "sv": "Swedish",
+    "uk": "Ukrainian"
 }
 
 # User sessions
@@ -116,15 +132,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📄 Translate document content\n"
         "• 🔁 Auto-detect source language\n"
         "• 📊 List all supported languages\n\n"
-        "**Supported Languages:**\n"
-        "English, Spanish, French, German, Italian, Portuguese,\n"
-        "Russian, Japanese, Korean, Chinese, Arabic, Hindi,\n"
-        "Dutch, Polish, Turkish, Vietnamese, Thai, Indonesian,\n"
-        "Malay, Swahili, Hausa, Yoruba, Igbo, Zulu, Afrikaans\n\n"
         "📤 **How to use:**\n"
         "1. Click 'Translate Text'\n"
         "2. Choose source and target languages\n"
-        "3. Send your text, voice, or document\n"
+        "3. Send your text\n"
         "4. Get your translation instantly!\n\n"
         "⬇️ Use the buttons below to get started!"
     )
@@ -321,11 +332,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "target_lang": "en"
         }
 
-# ==================== TRANSLATION FUNCTION ====================
-async def translate_text(text: str, source_lang: str = "auto", target_lang: str = "en"):
-    """Translate text using LibreTranslate API"""
+# ==================== TRANSLATION FUNCTIONS (FIXED) ====================
+async def translate_with_api(api_url: str, text: str, source_lang: str, target_lang: str):
+    """Try translation with a specific API"""
     try:
-        # Prepare request
         payload = {
             "q": text,
             "source": source_lang,
@@ -334,22 +344,74 @@ async def translate_text(text: str, source_lang: str = "auto", target_lang: str 
         }
         
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "application/json"
         }
         
         async with aiohttp.ClientSession() as session:
-            async with session.post(LIBRE_TRANSLATE_URL, json=payload, headers=headers, timeout=30) as response:
+            async with session.post(api_url, json=payload, headers=headers, timeout=15) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return data.get("translatedText", None)
-                else:
-                    print(f"Translation API error: {response.status}")
-                    return None
-    except asyncio.TimeoutError:
-        print("Translation timeout")
-        return None
+                    translated = data.get("translatedText")
+                    if translated:
+                        return translated
+                return None
     except Exception as e:
-        print(f"Translation error: {e}")
+        print(f"API error ({api_url}): {e}")
+        return None
+
+async def translate_text(text: str, source_lang: str = "auto", target_lang: str = "en"):
+    """Translate text using multiple API fallbacks"""
+    
+    # Check if text is empty or too short
+    if not text or len(text.strip()) < 1:
+        return None
+    
+    # If source is "auto", try to detect language first
+    if source_lang == "auto":
+        # Try to detect language (we'll use the first word as a simple heuristic)
+        # For production, you'd use a proper language detection library
+        pass
+    
+    # Try each API in order
+    for api in TRANSLATION_APIS:
+        try:
+            result = await translate_with_api(
+                api["url"],
+                text,
+                source_lang,
+                target_lang
+            )
+            if result:
+                print(f"✅ Translation successful using {api['name']}")
+                return result
+        except Exception as e:
+            print(f"❌ {api['name']} failed: {e}")
+            continue
+    
+    # If all APIs fail, use a fallback translation method
+    print("⚠️ All APIs failed, using fallback")
+    return await fallback_translate(text, source_lang, target_lang)
+
+async def fallback_translate(text: str, source_lang: str, target_lang: str):
+    """Simple fallback translation using a different API"""
+    try:
+        # Use MyMemory translation API (free, no API key)
+        url = "https://api.mymemory.translated.net/get"
+        params = {
+            "q": text,
+            "langpair": f"{source_lang}|{target_lang}"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=15) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("responseStatus") == 200:
+                        return data.get("responseData", {}).get("translatedText")
+                return None
+    except Exception as e:
+        print(f"Fallback translation error: {e}")
         return None
 
 # ==================== MESSAGE HANDLERS ====================
@@ -382,15 +444,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # Translate
+        # Translate with fallback
         translated = await translate_text(text, source, target)
         
-        if translated:
+        if translated and translated != text:
             await processing_msg.delete()
             
             # Truncate long translations for display
-            display_text = text[:200] + "..." if len(text) > 200 else text
-            display_translated = translated[:200] + "..." if len(translated) > 200 else translated
+            display_text = text[:300] + "..." if len(text) > 300 else text
+            display_translated = translated[:300] + "..." if len(translated) > 300 else translated
             
             await update.message.reply_text(
                 f"✅ **Translation Complete**\n\n"
@@ -404,7 +466,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await processing_msg.edit_text(
                 "❌ **Translation failed**\n\n"
-                "Please try again with different text.",
+                "I couldn't translate this text. Please try:\n"
+                "• Using a different language\n"
+                "• Sending shorter text\n"
+                "• Checking your internet connection\n\n"
+                "If the problem persists, contact the bot owner.",
                 parse_mode="Markdown",
                 reply_markup=get_main_keyboard()
             )
@@ -421,7 +487,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Default response
         await update.message.reply_text(
             "👋 **Send me text to translate or use the buttons below!**\n\n"
-            "I support 25+ languages.",
+            "I support 30+ languages.",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
@@ -445,17 +511,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         source_display = "Auto-detect" if source == "auto" else LANGUAGES.get(source, "Unknown")
         target_display = LANGUAGES.get(target, "English")
         
-        # Note: Voice translation requires speech-to-text API
-        # For now, we'll provide a placeholder response
         await update.message.reply_text(
             f"🎤 **Voice received!**\n\n"
             f"🔹 From: {source_display}\n"
             f"🔹 To: {target_display}\n\n"
-            "⚠️ **Note:** Voice translation requires a speech-to-text API.\n\n"
+            "⚠️ **Voice translation requires a speech-to-text API.**\n\n"
             "For now, you can:\n"
-            "• Use the voice-to-text feature in Telegram\n"
-            "• Send the transcribed text for translation\n"
-            "• Use the 'Translate Text' option instead\n\n"
+            "1. Use Telegram's voice-to-text feature\n"
+            "2. Send the transcribed text for translation\n"
+            "3. Use the 'Translate Text' option instead\n\n"
             "I'll translate text messages instantly! 🌍",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
@@ -508,22 +572,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Translate document content
                 translated = await translate_text(text, source, target)
                 
-                if translated:
+                if translated and translated != text:
                     await processing_msg.delete()
                     
                     # Send translated text
+                    display_translated = translated[:1000] + "..." if len(translated) > 1000 else translated
+                    
                     await update.message.reply_text(
                         f"✅ **Document Translation Complete**\n\n"
                         f"📄 File: {document.file_name}\n"
                         f"🌍 Translated to: {target_display}\n\n"
-                        f"{translated[:1000]}{'...' if len(translated) > 1000 else ''}",
+                        f"{display_translated}",
                         parse_mode="Markdown",
                         reply_markup=get_main_keyboard()
                     )
                 else:
                     await processing_msg.edit_text(
                         "❌ **Translation failed**\n\n"
-                        "Please try again.",
+                        "Please try again with a different document.",
                         parse_mode="Markdown",
                         reply_markup=get_main_keyboard()
                     )
@@ -555,6 +621,7 @@ def main():
     """Start the bot"""
     print("🚀 Starting LinguaLinkBot...")
     print(f"🌍 Supported languages: {len(LANGUAGES)}")
+    print(f"🔗 Translation APIs: {len(TRANSLATION_APIS)}")
     print("🔗 Ready to translate!")
     
     # Build application
